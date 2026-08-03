@@ -1,0 +1,121 @@
+admin:
+  address:
+    socket_address: { address: 0.0.0.0, port_value: 9902 }
+
+# Identifies this envoy instance. Boilerplate, irrelevant to the example.
+node:
+  cluster: envoy-client-cluster
+  id: envoy-client-node-1
+
+static_resources:
+  listeners:
+  - name: postgres_listener
+    address:
+      # Listen on :5432 in plaintext. The Go application connects here thinking it is
+      # talking directly to a Postgres server. No TLS on the downstream side.
+      socket_address: { address: 0.0.0.0, port_value: 5432 }
+    filter_chains:
+    - filters:
+      # The postgres_proxy filter parses the Postgres wire protocol and emits L7 stats
+      # (sessions, statements, transactions, errors). It is a contrib extension and requires
+      # the envoyproxy/envoy-contrib image.
+      - name: envoy.filters.network.postgres_proxy
+        typed_config:
+          "@type": type.googleapis.com/envoy.extensions.filters.network.postgres_proxy.v3alpha.PostgresProxy
+          stat_prefix: egress_pg
+          # SQL parsing is enabled by default and produces per-statement-type stats
+          # (statements_select, statements_insert, etc.)
+          enable_sql_parsing: true
+          # terminate_ssl: false because the Go client connects with sslmode=disable.
+          # If the client sends an SSLRequest message, Envoy will respond with 'N' and
+          # the client falls back to plaintext automatically.
+          terminate_ssl: false
+      # The Wasm filter intercepts the Postgres cleartext authentication exchange,
+      # rewrites the username to the normalized SPIFFE ID path, fetches a JWT SVID
+      # from SPIRE, and injects it as the password on behalf of the client.
+      - name: envoy.filters.network.wasm
+        typed_config:
+          "@type": type.googleapis.com/envoy.extensions.filters.network.wasm.v3.Wasm
+          config:
+            name: pg_credential_injector
+            root_id: pg_credential_injector
+            configuration:
+              "@type": type.googleapis.com/google.protobuf.StringValue
+              value: '{"spiffe_id":"spiffe://demo.trust.geico/client-proxy"}'
+            vm_config:
+              runtime: envoy.wasm.runtime.v8
+              code:
+                local:
+                  filename: /etc/envoy/pg_credential_injector.wasm
+      # The TCP proxy forwards the Postgres byte stream upstream over an mTLS tunnel
+      # to the server-side Envoy sidecar.
+      - name: envoy.filters.network.tcp_proxy
+        typed_config:
+          "@type": type.googleapis.com/envoy.extensions.filters.network.tcp_proxy.v3.TcpProxy
+          stat_prefix: tcp_egress_pg
+          cluster: envoy_server
+
+  clusters:
+  # The server-side Envoy sidecar. Outbound connections use mTLS with SPIFFE SVIDs
+  # obtained from the SPIRE agent via SDS. This is where TLS origination happens —
+  # the Go application is completely unaware of this.
+  - name: envoy_server
+    connect_timeout: 5s
+    type: STRICT_DNS
+    lb_policy: ROUND_ROBIN
+    load_assignment:
+      cluster_name: envoy_server
+      endpoints:
+      - lb_endpoints:
+        - endpoint:
+            address:
+              socket_address:
+                address: envoy-server
+                port_value: 10000
+    transport_socket:
+      name: envoy.transport_sockets.tls
+      typed_config:
+        "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.UpstreamTlsContext
+        common_tls_context:
+          tls_certificate_sds_secret_configs:
+          # The SPIFFE ID of this client-side Envoy. SPIRE issues the X.509 SVID for this ID.
+          - name: "spiffe://demo.trust.geico/client-proxy"
+            sds_config:
+              resource_api_version: V3
+              api_config_source:
+                api_type: GRPC
+                transport_api_version: V3
+                grpc_services:
+                  envoy_grpc:
+                    cluster_name: spire_agent
+          combined_validation_context:
+            default_validation_context:
+              match_typed_subject_alt_names:
+              - san_type: URI
+                matcher:
+                  # The server-side Envoy must present a certificate with this SPIFFE ID.
+                  exact: "spiffe://demo.trust.geico/server-proxy"
+            validation_context_sds_secret_config:
+              # Fetch the trust bundle from the SPIRE agent to validate the server certificate.
+              name: "spiffe://demo.trust.geico"
+              sds_config:
+                resource_api_version: V3
+                api_config_source:
+                  api_type: GRPC
+                  transport_api_version: V3
+                  grpc_services:
+                    envoy_grpc:
+                      cluster_name: spire_agent
+
+  # The SPIRE agent socket. Envoy uses this cluster to fetch SVIDs and trust bundles via SDS.
+  - name: spire_agent
+    connect_timeout: 0.25s
+    http2_protocol_options: {}
+    load_assignment:
+      cluster_name: spire_agent
+      endpoints:
+      - lb_endpoints:
+        - endpoint:
+            address:
+              pipe:
+                path: /tmp/spire-agent/public/api.sock

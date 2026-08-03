@@ -1,0 +1,19 @@
+FROM tinygo/tinygo:0.34.0 AS builder
+
+WORKDIR /build
+
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY main.go .
+
+# -scheduler=none: no goroutines needed in a synchronous filter; reduces binary size
+# -target=wasip1:  produces a WASI-compatible Wasm binary (Envoy V8 runtime supports this)
+RUN tinygo build -o pg_credential_injector.wasm \
+    -scheduler=none \
+    -target=wasip1 \
+    main.go
+
+# Scratch stage so the output layer contains only the .wasm binary
+FROM scratch
+COPY --from=builder /build/pg_credential_injector.wasm /

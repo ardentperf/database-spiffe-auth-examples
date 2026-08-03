@@ -1,0 +1,30 @@
+### This runs the client-side Envoy sidecar. It listens on :5432 in plaintext, accepting connections
+### from the Go application that thinks it is connecting directly to a Postgres server.
+### The postgres_proxy filter parses the Postgres wire protocol and emits L7 stats.
+### Outbound connections to the server-side Envoy are encrypted with mTLS using a SPIFFE X.509 SVID
+### obtained from the SPIRE agent via SDS.
+
+networks:
+  spiffe-auth:
+
+services:
+  envoy-client:
+    image: envoyproxy/envoy-contrib:v1.35-latest
+    container_name: envoy-client
+    # Admin interface on :9902 (9901 is used by the server-side Envoy).
+    ports:
+      - "9902:9902"
+    volumes:
+      - ./envoy/client-config.yml:/etc/envoy/envoy.yml
+      - ./envoy/pg_credential_injector.wasm:/etc/envoy/pg_credential_injector.wasm:ro
+      - spire-agent-socket:/tmp/spire-agent/public:rw
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        envoy -c /etc/envoy/envoy.yml --log-level info
+    restart:
+      on-failure
+    depends_on:
+      - spire-agent
+      - envoy-server

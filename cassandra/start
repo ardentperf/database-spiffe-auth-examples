@@ -1,0 +1,56 @@
+#!/bin/bash
+
+set -e
+set -o pipefail
+
+# Ensure .env exists so docker compose can validate the spire-agent service's env_file reference.
+touch .env
+
+# First, start the SPIRE server and wait for it to be ready.
+docker compose up -d spire-server
+
+sleep 15
+
+# Then, generate a join token for the SPIRE agent.
+raw_join_token=$(docker compose exec spire-server /opt/spire/bin/spire-server token generate -spiffeID spiffe://demo.trust.geico/agent-1)
+join_token=$(echo "$raw_join_token" | grep Token | awk '{print substr($0, 8)}')
+
+# Write the join token to the .env file.
+echo "JOIN_TOKEN=$join_token" > .env
+
+# Then, start the SPIRE agent, envoy proxy and Cassandra node.
+docker compose up -d spire-agent
+docker compose up -d envoy
+docker compose up -d cassandra-1
+
+# Build the app image (but don't start it yet).
+docker compose build app
+
+# Create SPIFFE ID entries for the application and envoy containers,
+# using the image ID of the containers as the "selector".
+#
+# If you'd like to use this for other containers, you can change the image ID to a different value.
+docker compose exec spire-server /opt/spire/bin/spire-server entry create \
+    -spiffeID spiffe://demo.trust.geico/app \
+    -parentID spiffe://demo.trust.geico/agent-1 \
+    -selector docker:image_id:cassandra-spiffe-auth-app
+
+docker compose exec spire-server /opt/spire/bin/spire-server entry create \
+    -spiffeID spiffe://demo.trust.geico/cassandra-node \
+    -parentID spiffe://demo.trust.geico/agent-1 \
+    -selector docker:image_id:envoyproxy/envoy:v1.37-latest
+
+# Wait for Cassandra to accept CQL connections before creating the keyspace.
+echo "Waiting for Cassandra to be ready..."
+cass_wait_start=$SECONDS
+until docker compose exec cassandra-1 cqlsh -u cassandra -p cassandra -e "DESCRIBE KEYSPACES" > /dev/null 2>&1; do
+    echo "  Still waiting... ($((SECONDS - cass_wait_start))s elapsed)"
+    sleep 10
+done
+echo "Cassandra is ready (took $((SECONDS - cass_wait_start))s)."
+
+# Create a simple keyspace in Cassandra.
+docker compose exec cassandra-1 cqlsh -u cassandra -p cassandra -e "CREATE KEYSPACE IF NOT EXISTS demo WITH REPLICATION = {'class': 'SimpleStrategy', 'replication_factor': 1};"
+
+# Start the app last, after SPIFFE entries are registered and Cassandra is ready.
+docker compose up -d app

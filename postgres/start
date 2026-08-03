@@ -1,0 +1,92 @@
+#!/bin/bash
+
+set -e
+set -o pipefail
+
+# Ensure .env exists so docker compose can validate the spire-agent service's env_file reference.
+touch .env
+
+# First, start the SPIRE server and wait for it to be ready.
+docker compose up -d spire-server
+
+# Give the SPIRE server time to initialize before generating a join token.
+sleep 15
+
+# Then, generate a join token for the SPIRE agent.
+raw_join_token=$(docker compose exec spire-server /opt/spire/bin/spire-server token generate -spiffeID spiffe://demo.trust.geico/agent-1)
+join_token=$(echo "$raw_join_token" | grep Token | awk '{print substr($0, 8)}')
+
+# Write the join token to the .env file.
+echo "JOIN_TOKEN=$join_token" > .env
+
+# Build the Wasm credential-injector binary and place it in envoy/ so the client-side
+# Envoy sidecar can load it at startup.
+echo "Building pg_credential_injector.wasm..."
+docker build -f wasm/pg-credential-injector/Dockerfile.build \
+    -o type=local,dest=envoy/ \
+    wasm/pg-credential-injector/
+echo "Wasm binary built: envoy/pg_credential_injector.wasm"
+
+# Build custom images (Postgres and app) before starting anything.
+docker compose build postgres app
+
+# Start the SPIRE agent, both Envoy sidecars, and Postgres.
+docker compose up -d spire-agent envoy-server envoy-client postgres
+
+# Create SPIFFE ID entries for the two Envoy sidecar containers.
+#
+# Both Envoy containers use the same Docker image (envoyproxy/envoy-contrib:v1.35-latest),
+# so both will match the same docker:image_id selector. This is intentional: SPIRE issues
+# ALL matching SVIDs to any workload that matches a selector. Each Envoy requests only the
+# SVID it needs by name via SDS, so each container gets its own identity even though they
+# share the same image.
+docker compose exec spire-server /opt/spire/bin/spire-server entry create \
+    -spiffeID spiffe://demo.trust.geico/client-proxy \
+    -parentID spiffe://demo.trust.geico/agent-1 \
+    -selector docker:image_id:envoyproxy/envoy-contrib:v1.35-latest \
+    -jwtSVIDTTL 300
+
+docker compose exec spire-server /opt/spire/bin/spire-server entry create \
+    -spiffeID spiffe://demo.trust.geico/server-proxy \
+    -parentID spiffe://demo.trust.geico/agent-1 \
+    -selector docker:image_id:envoyproxy/envoy-contrib:v1.35-latest
+
+# Register the custom Postgres container so the SPIRE agent will issue it a
+# Workload API identity. This allows verify-jwt.sh (running as pam_exec inside the
+# Postgres container) to call spire-agent api validate jwt over the shared Unix socket.
+# The image tag for the custom postgres build follows Docker Compose's naming convention:
+# <project>-<service> (project = directory name, service = "postgres").
+docker compose exec spire-server /opt/spire/bin/spire-server entry create \
+    -spiffeID spiffe://demo.trust.geico/postgres \
+    -parentID spiffe://demo.trust.geico/agent-1 \
+    -selector docker:image_id:postgres-postgres
+
+# Wait for Postgres to accept connections before starting the app.
+echo "Waiting for Postgres to be ready..."
+pg_wait_start=$SECONDS
+until docker compose exec postgres pg_isready -U demo > /dev/null 2>&1; do
+    echo "  Still waiting... ($((SECONDS - pg_wait_start))s elapsed)"
+    sleep 5
+done
+echo "Postgres is ready (took $((SECONDS - pg_wait_start))s)."
+
+# Create the client_proxy role in Postgres. The Wasm filter rewrites the
+# connecting username to the normalized SPIFFE ID path ("client_proxy"), so Postgres
+# must have a role with that exact name. We also grant it privileges on the demo schema.
+echo "Creating client_proxy role in Postgres..."
+docker compose exec postgres psql -U demo -d demo -c "
+    CREATE ROLE client_proxy LOGIN;
+    GRANT ALL ON SCHEMA public TO client_proxy;
+    ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO client_proxy;
+    ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON SEQUENCES TO client_proxy;
+" || true
+
+# Brief pause to allow the Envoy sidecars time to obtain their SVIDs from the SPIRE agent.
+# Without this, the app may attempt to connect before Envoy has completed the SDS handshake,
+# causing a few connection resets. The app has restart:on-failure so it recovers automatically,
+# but this sleep reduces the noise in the logs.
+echo "Waiting for Envoy sidecars to obtain SVIDs..."
+sleep 10
+
+# Start the app last, after SPIFFE entries are registered and Postgres is ready.
+docker compose up -d app

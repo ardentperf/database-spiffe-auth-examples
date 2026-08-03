@@ -1,0 +1,23 @@
+### This runs a simple Envoy reverse proxy that forwards traffic to a Cassandra node using SPIFFE/SPIRE to authenticate
+### the client application via mTLS. The mTLS stream is terminated at the Envoy proxy and the Envoy container
+### connects to the Cassandra node via a plaintext connection.
+
+networks:
+  spiffe-auth:
+
+services:
+  envoy:
+    image: envoyproxy/envoy:v1.37-latest
+    container_name: envoy
+    ports:
+      - "10000:10000"
+    volumes:
+      - ./envoy/config.yml:/etc/envoy/envoy.yml
+      - spire-agent-socket:/tmp/spire-agent/public:rw
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        envoy -c /etc/envoy/envoy.yml --log-level trace
+    restart:
+      on-failure

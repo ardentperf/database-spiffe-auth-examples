@@ -1,0 +1,4 @@
+# auth: validate the JWT SVID passed as the password via pam_exec.
+auth    required    pam_exec.so expose_authtok /opt/spiffe-auth/verify-jwt.sh
+# account: permit all accounts (user existence is already checked by Postgres itself).
+account required    pam_permit.so

@@ -1,0 +1,64 @@
+#!/bin/bash
+
+# set -e
+set -o pipefail
+
+# This verification script uses the logs of the app container to verify that everything worked
+# as expected. For each step, the script will check the logs for a success message and exit with
+# an error if the success message is not found.
+
+# Verify that the SVID was retrieved from the socket successfully.
+gotSVID=$(docker compose logs app | grep "Retrieved SPIFFE ID from socket with SPIFFE ID")
+if [ -z "$gotSVID" ]; then
+    echo "Error: No SVID retrieved from socket"
+    exit 1
+else
+    echo "Success: SVID retrieved from socket"
+fi
+
+# Verify that the mTLS handshake between the application and the envoy proxy was successful.
+gotMTLSHandshake=$(docker compose logs app | grep "Verified SPIFFE ID: spiffe://demo.trust.geico/cassandra-node")
+if [ -z "$gotMTLSHandshake" ]; then
+    echo "Error: No mTLS handshake completed"
+    exit 1
+else
+    echo "Success: mTLS handshake completed"
+fi
+
+# Verify that the connection to the Cassandra node was successful from the application.
+connectedToCassandra=$(docker compose logs app | grep "Connected to Cassandra")
+if [ -z "$connectedToCassandra" ]; then
+    echo "Error: No connection to Cassandra established"
+    exit 1
+else
+    echo "Success: Connection to Cassandra established"
+fi
+
+# Verify that the query to the Cassandra node was successful.
+gotRow=$(docker compose logs app | grep "Retrieved row from system.local")
+if [ -z "$gotRow" ]; then
+    echo "Error: No row retrieved from system.local"
+    exit 1
+fi
+
+# Verify that the whole thing was successful.
+gotSuccess=$(docker compose logs app | grep "Successfully connected to Cassandra and retrieved row from system.local")
+if [ -z "$gotSuccess" ]; then
+    echo "Error: No success message found"
+    exit 1
+else
+    echo "Success: Everything was successful"
+fi
+
+# Verify the app container exited successfully.
+appExitedSuccessfully=$(docker compose ps --all app | grep "Exited (0)")
+if [ -z "$appExitedSuccessfully" ]; then
+    echo "Error: App container exited with an error"
+    exit 1
+else
+    echo "Success: App container exited successfully"
+fi
+
+echo "Verification complete!"
+echo "All tests passed."
+exit 0

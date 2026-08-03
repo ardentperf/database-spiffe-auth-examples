@@ -1,0 +1,47 @@
+### This is an extremely minimal Spire server + agent setup for use in the spiffe-auth example.
+### There are no best-practices here. This is just a quick and dirty way to get a Spire server + agent up and running.
+
+networks:
+  spiffe-auth:
+
+services:
+  spire-server:
+    image: ghcr.io/spiffe/spire-server:1.14.0
+    container_name: spire-server
+    volumes:
+      - ./spire/server/server.conf:/opt/spire/conf/server/server.conf
+    restart:
+      on-failure
+    depends_on:
+      - cassandra-1
+    ports:
+      - "8081:8081"
+  spire-agent:
+    use_api_socket: true
+    privileged: true
+    pid: host
+    image: ghcr.io/spiffe/spire-agent:1.14.0
+    container_name: spire-agent
+    volumes:
+      - ./spire/agent/agent.conf:/opt/spire/conf/agent/agent.conf
+      - spire-agent-socket:/tmp/spire-agent/public:rw
+    restart:
+      on-failure
+    depends_on:
+      - spire-server
+    env_file:
+      - .env
+    environment:
+      - HTTP_PROXY=
+      - HTTPS_PROXY=
+      - NO_PROXY=
+      - http_proxy=
+      - https_proxy=
+      - no_proxy=
+    entrypoint:
+      - /opt/spire/bin/spire-agent
+      - run
+      - -config
+      - /opt/spire/conf/agent/agent.conf
+      - -joinToken
+      - ${JOIN_TOKEN}

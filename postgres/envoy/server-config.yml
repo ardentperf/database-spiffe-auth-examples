@@ -1,0 +1,103 @@
+admin:
+  address:
+    socket_address: { address: 0.0.0.0, port_value: 9901 }
+
+# Identifies this envoy instance. Boilerplate, irrelevant to the example.
+node:
+  cluster: envoy-server-cluster
+  id: envoy-server-node-1
+
+static_resources:
+  listeners:
+  - name: postgres_listener
+    address:
+      # Listen on :10000 for incoming mTLS connections from the client-side Envoy sidecar.
+      # TLS is terminated here; the Postgres wire protocol is forwarded in plaintext to
+      # the postgres container on :5432.
+      socket_address: { address: 0.0.0.0, port_value: 10000 }
+    filter_chains:
+    - filters:
+      # The postgres_proxy filter parses the Postgres wire protocol on the ingress side
+      # and emits L7 stats (sessions, statements, transactions, errors).
+      - name: envoy.filters.network.postgres_proxy
+        typed_config:
+          "@type": type.googleapis.com/envoy.extensions.filters.network.postgres_proxy.v3alpha.PostgresProxy
+          stat_prefix: ingress_pg
+          enable_sql_parsing: true
+          # terminate_ssl: true instructs Envoy to handle any SSLRequest messages from the
+          # downstream client (the client-side Envoy). Since the client-side Envoy connects
+          # with plaintext-over-mTLS, this should not occur, but it is set as a safeguard
+          # to prevent the filter from being confused by any spurious SSLRequest.
+          terminate_ssl: true
+      # The TCP proxy forwards the Postgres byte stream to the actual Postgres container.
+      - name: envoy.filters.network.tcp_proxy
+        typed_config:
+          "@type": type.googleapis.com/envoy.extensions.filters.network.tcp_proxy.v3.TcpProxy
+          stat_prefix: tcp_ingress_pg
+          cluster: postgres
+      # mTLS is enforced on the downstream connection. The client-side Envoy must present
+      # a valid X.509 SVID with the expected SPIFFE ID. Certificates are fetched from the
+      # SPIRE agent via SDS.
+      transport_socket:
+        name: envoy.transport_sockets.tls
+        typed_config:
+          "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.DownstreamTlsContext
+          common_tls_context:
+            tls_certificate_sds_secret_configs:
+            # The SPIFFE ID of this server-side Envoy. SPIRE issues the X.509 SVID for this ID.
+            - name: "spiffe://demo.trust.geico/server-proxy"
+              sds_config:
+                resource_api_version: V3
+                api_config_source:
+                  api_type: GRPC
+                  transport_api_version: V3
+                  grpc_services:
+                    envoy_grpc:
+                      cluster_name: spire_agent
+            combined_validation_context:
+              default_validation_context:
+                match_typed_subject_alt_names:
+                - san_type: URI
+                  matcher:
+                    # The client must present a certificate with this SPIFFE ID.
+                    exact: "spiffe://demo.trust.geico/client-proxy"
+              validation_context_sds_secret_config:
+                # Fetch the trust bundle from the SPIRE agent to validate the client certificate.
+                name: "spiffe://demo.trust.geico"
+                sds_config:
+                  resource_api_version: V3
+                  api_config_source:
+                    api_type: GRPC
+                    transport_api_version: V3
+                    grpc_services:
+                      envoy_grpc:
+                        cluster_name: spire_agent
+
+  clusters:
+  # The Postgres container. Connections are plaintext — mTLS is terminated at this Envoy.
+  - name: postgres
+    connect_timeout: 5s
+    type: STRICT_DNS
+    lb_policy: ROUND_ROBIN
+    load_assignment:
+      cluster_name: postgres
+      endpoints:
+      - lb_endpoints:
+        - endpoint:
+            address:
+              socket_address:
+                address: postgres
+                port_value: 5432
+
+  # The SPIRE agent socket. Envoy uses this cluster to fetch SVIDs and trust bundles via SDS.
+  - name: spire_agent
+    connect_timeout: 0.25s
+    http2_protocol_options: {}
+    load_assignment:
+      cluster_name: spire_agent
+      endpoints:
+      - lb_endpoints:
+        - endpoint:
+            address:
+              pipe:
+                path: /tmp/spire-agent/public/api.sock

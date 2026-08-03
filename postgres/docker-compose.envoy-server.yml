@@ -1,0 +1,28 @@
+### This runs the server-side Envoy sidecar. It listens on :10000 and requires mTLS from clients,
+### validating their SPIFFE X.509 SVID. The postgres_proxy filter parses the Postgres wire protocol
+### and emits L7 stats. The mTLS stream is terminated at this Envoy, and traffic is forwarded to
+### the Postgres container via a plaintext connection on :5432.
+
+networks:
+  spiffe-auth:
+
+services:
+  envoy-server:
+    image: envoyproxy/envoy-contrib:v1.35-latest
+    container_name: envoy-server
+    # Admin interface on :9901 to inspect Postgres L7 stats.
+    ports:
+      - "9901:9901"
+    volumes:
+      - ./envoy/server-config.yml:/etc/envoy/envoy.yml
+      - spire-agent-socket:/tmp/spire-agent/public:rw
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        envoy -c /etc/envoy/envoy.yml --log-level info
+    restart:
+      on-failure
+    depends_on:
+      - spire-agent
+      - postgres

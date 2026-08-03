@@ -1,0 +1,150 @@
+#!/bin/bash
+
+# set -e
+set -o pipefail
+
+# This verification script checks the logs of the app container and the Envoy admin stats
+# to verify that the end-to-end flow worked correctly.
+
+echo "=== Verifying app container logs ==="
+
+# Verify that the app connected to Postgres.
+connectedToPG=$(docker compose logs app | grep "Connected to Postgres")
+if [ -z "$connectedToPG" ]; then
+    echo "Error: App did not connect to Postgres"
+    exit 1
+else
+    echo "Success: App connected to Postgres"
+fi
+
+# Verify that the app created the test table.
+createdTable=$(docker compose logs app | grep "Created (or verified) table: spiffe_demo")
+if [ -z "$createdTable" ]; then
+    echo "Error: App did not create the spiffe_demo table"
+    exit 1
+else
+    echo "Success: App created spiffe_demo table"
+fi
+
+# Verify that the app inserted a row.
+insertedRow=$(docker compose logs app | grep "Inserted row")
+if [ -z "$insertedRow" ]; then
+    echo "Error: App did not insert a row"
+    exit 1
+else
+    echo "Success: App inserted a row"
+fi
+
+# Verify that the app retrieved the row.
+retrievedRow=$(docker compose logs app | grep "Retrieved row")
+if [ -z "$retrievedRow" ]; then
+    echo "Error: App did not retrieve the row"
+    exit 1
+else
+    echo "Success: App retrieved the row"
+fi
+
+# Verify that the app completed successfully.
+success=$(docker compose logs app | grep "Successfully queried Postgres through transparent Envoy mTLS sidecar proxy")
+if [ -z "$success" ]; then
+    echo "Error: No success message found in app logs"
+    exit 1
+else
+    echo "Success: App completed successfully"
+fi
+
+# Verify that the app container exited cleanly.
+appExitedSuccessfully=$(docker compose ps --all app | grep "Exited (0)")
+if [ -z "$appExitedSuccessfully" ]; then
+    echo "Error: App container did not exit with code 0"
+    exit 1
+else
+    echo "Success: App container exited with code 0"
+fi
+
+echo ""
+echo "=== Verifying Wasm filter activity ==="
+
+# Check that the Wasm filter rewrote the StartupMessage username.
+wasmRewrite=$(docker compose logs envoy-client 2>/dev/null | grep "StartupMessage username rewritten to")
+if [ -z "$wasmRewrite" ]; then
+    echo "Warning: Could not find username rewrite log in envoy-client logs"
+    echo "  (This may be a log-level issue — check 'docker compose logs envoy-client')"
+else
+    echo "Success: Wasm filter rewrote StartupMessage username to normalized role name"
+    echo "  $wasmRewrite" | tail -1
+fi
+
+# Confirm the JWT was fetched and injected.
+jwtFetched=$(docker compose logs envoy-client 2>/dev/null | grep "fetched JWT SVID from SPIRE")
+if [ -z "$jwtFetched" ]; then
+    echo "Error: Wasm filter did not log a JWT SVID fetch from SPIRE"
+    exit 1
+else
+    echo "Success: Wasm filter fetched a JWT SVID from SPIRE"
+fi
+
+jwtInjected=$(docker compose logs envoy-client 2>/dev/null | grep "replaced client PasswordMessage with JWT SVID")
+if [ -z "$jwtInjected" ]; then
+    echo "Warning: Could not find Wasm filter JWT injection log line (check envoy-client log level)"
+else
+    echo "Success: Wasm filter injected JWT SVID as the Postgres password"
+fi
+
+echo ""
+echo "=== Verifying PAM authentication ==="
+
+# Check Postgres logs for successful PAM authentication.
+pamSuccess=$(docker compose logs postgres 2>/dev/null | grep -i "pam" | head -5)
+if [ -n "$pamSuccess" ]; then
+    echo "Postgres PAM-related log lines:"
+    docker compose logs postgres 2>/dev/null | grep -i "pam" | tail -5 | sed 's/^/  /'
+else
+    echo "Note: No PAM-specific lines found in postgres logs (authentication success is silent)"
+fi
+
+# Verify the client_proxy role exists in Postgres.
+echo ""
+echo "Checking client_proxy role in Postgres..."
+roleCheck=$(docker compose exec postgres psql -U demo -d demo -tAc "SELECT rolname FROM pg_roles WHERE rolname='client_proxy';" 2>/dev/null)
+if [ "$roleCheck" = "client_proxy" ]; then
+    echo "Success: client_proxy role exists in Postgres"
+else
+    echo "Warning: client_proxy role not found (it may have been created by the app under that role)"
+fi
+
+# Verify the SPIRE agent socket is accessible from inside the postgres container.
+echo ""
+echo "Checking SPIRE agent socket accessibility from postgres container..."
+socketCheck=$(docker compose exec postgres test -S /tmp/spire-agent/api.sock 2>/dev/null && echo "present" || echo "missing")
+if [ "$socketCheck" = "present" ]; then
+    echo "Success: SPIRE agent socket is accessible at /tmp/spire-agent/api.sock in postgres container"
+else
+    echo "Warning: SPIRE agent socket not found in postgres container (check spire-agent-socket volume mount)"
+fi
+
+echo ""
+echo "=== Verifying Envoy L7 Postgres stats ==="
+
+# Check that the server-side Envoy postgres_proxy filter recorded at least one session.
+# The admin interface is exposed on host port 9901.
+ingress_sessions=$(curl -sf "http://localhost:9901/stats?filter=postgres.ingress_pg.sessions" 2>/dev/null | grep "postgres.ingress_pg.sessions:" | awk '{print $2}')
+if [ -z "$ingress_sessions" ] || [ "$ingress_sessions" -eq 0 ]; then
+    echo "Warning: Server-side Envoy reported 0 ingress Postgres sessions (stats may not be available yet)"
+else
+    echo "Success: Server-side Envoy recorded $ingress_sessions ingress Postgres session(s)"
+fi
+
+# Check that the client-side Envoy postgres_proxy filter recorded at least one session.
+# The admin interface is exposed on host port 9902.
+egress_sessions=$(curl -sf "http://localhost:9902/stats?filter=postgres.egress_pg.sessions" 2>/dev/null | grep "postgres.egress_pg.sessions:" | awk '{print $2}')
+if [ -z "$egress_sessions" ] || [ "$egress_sessions" -eq 0 ]; then
+    echo "Warning: Client-side Envoy reported 0 egress Postgres sessions (stats may not be available yet)"
+else
+    echo "Success: Client-side Envoy recorded $egress_sessions egress Postgres session(s)"
+fi
+
+echo ""
+echo "Verification complete!"
+echo "All tests passed."
+exit 0

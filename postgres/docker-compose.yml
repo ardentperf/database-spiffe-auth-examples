@@ -1,0 +1,12 @@
+networks:
+  spiffe-auth:
+
+include:
+  - docker-compose.spire.yml
+  - docker-compose.pg.yml
+  - docker-compose.envoy-client.yml
+  - docker-compose.envoy-server.yml
+  - docker-compose.client-go.app.yml
+
+volumes:
+  spire-agent-socket:

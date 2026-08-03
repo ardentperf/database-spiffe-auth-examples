@@ -1,0 +1,29 @@
+### This runs a simple Go application that connects to a Cassandra node using SPIFFE/SPIRE to authenticate
+### the mTLS channel to a reverse proxy (envoy) in front of the Cassandra node.
+
+networks:
+  spiffe-auth:
+
+services:
+  app:
+    build:
+      # Build the Go application from the client-go directory.
+      # This makes it easy to make changes to the Go application and test them without having to rebuild the entire stack.
+      # To update, use `docker compose up --build app -f docker-compose.client-go.app.yml -f docker-compose.yml`
+      context: ./client-go
+      dockerfile: Dockerfile
+      platforms:
+        # If you are not running on a Linux OS or do not have arm64, you can change this to the correct Docker `--platform` 
+        # value for your system.
+        - "linux/arm64"
+      tags:
+        - cassandra-spiffe-auth-app:latest
+      target: app
+    volumes:
+      # Mount the SPIRE agent socket from the spire-agent service.
+      - spire-agent-socket:/tmp/spire-agent/public:rw
+    container_name: app
+    restart:
+      on-failure
+    ports:
+      - "40000:40000"

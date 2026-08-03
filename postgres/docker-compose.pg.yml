@@ -1,0 +1,27 @@
+### This is an extremely minimal single-node Postgres instance for use in the spiffe-auth example.
+### There are no best-practices here. This is just a quick and dirty way to get a Postgres server up and running.
+
+networks:
+  spiffe-auth:
+
+services:
+  postgres:
+    # Custom image built from postgres-custom/. It copies in the spire-agent binary
+    # (for pam_exec JWT validation) and installs a pg_hba.conf that uses PAM authentication
+    # for remote connections.
+    build:
+      context: ./postgres-custom
+    container_name: postgres
+    environment:
+      - POSTGRES_USER=demo
+      - POSTGRES_PASSWORD=demo
+      - POSTGRES_DB=demo
+      # PAM authentication. The Wasm filter injects the JWT SVID as the password;
+      # Postgres calls pam_exec -> verify-jwt.sh -> spire-agent api validate jwt to validate it.
+      - POSTGRES_HOST_AUTH_METHOD=pam
+    volumes:
+      # Mount the SPIRE agent socket so that verify-jwt.sh can call spire-agent api validate jwt
+      # over the local Unix socket without any network calls.
+      - spire-agent-socket:/tmp/spire-agent:ro
+    restart:
+      on-failure

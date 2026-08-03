@@ -1,0 +1,12 @@
+networks:
+  spiffe-auth:
+
+include:
+  - docker-compose.envoy.yml
+  - docker-compose.spire.yml
+  - docker-compose.cass.yml
+  - docker-compose.client-go.app.yml
+
+volumes:
+  cassandra-node-1:
+  spire-agent-socket:
