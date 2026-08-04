@@ -12,6 +12,8 @@ services:
     build:
       context: ./postgres-custom
     container_name: postgres
+    # Log successful authenticated connections so verify can assert PAM authorization.
+    command: ["postgres", "-c", "log_connections=on"]
     environment:
       - POSTGRES_USER=demo
       - POSTGRES_PASSWORD=demo

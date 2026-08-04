@@ -94,13 +94,13 @@ fi
 echo ""
 echo "=== Verifying PAM authentication ==="
 
-# Check Postgres logs for successful PAM authentication.
-pamSuccess=$(docker compose logs postgres 2>/dev/null | grep -i "pam" | head -5)
-if [ -n "$pamSuccess" ]; then
-    echo "Postgres PAM-related log lines:"
-    docker compose logs postgres 2>/dev/null | grep -i "pam" | tail -5 | sed 's/^/  /'
+# PostgreSQL logs this only after a connection has authenticated successfully.
+authorizedConnection=$(docker compose logs postgres 2>/dev/null | grep "connection authorized: user=client_proxy database=demo")
+if [ -z "$authorizedConnection" ]; then
+    echo "Error: Postgres did not log an authorized client_proxy connection"
+    exit 1
 else
-    echo "Note: No PAM-specific lines found in postgres logs (authentication success is silent)"
+    echo "Success: Postgres authorized the client_proxy connection"
 fi
 
 # Verify the client_proxy role exists in Postgres.

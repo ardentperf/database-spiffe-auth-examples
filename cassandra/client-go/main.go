@@ -22,8 +22,9 @@ const (
 	CassandraNodeSPIFFEIDPath = "/cassandra-node"
 	// The socket path to the SPIRE agent.
 	SpireAgentSocketPath = "unix:///tmp/spire-agent/public/api.sock"
-	// The host and port of the Cassandra node.
-	CassandraNodeHost = "host.docker.internal:10000"
+	// The Compose service name and port of the Envoy proxy in front of Cassandra.
+	//      This hostname might need to be changed in some environments (cf main README)
+	CassandraNodeHost = "envoy:10000"
 )
 
 // The server must present a certificate to the GoCQL connection with a SPIFFE ID in this list.

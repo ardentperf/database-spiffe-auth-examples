@@ -6,16 +6,13 @@ networks:
 
 services:
   app:
+    image: cassandra-spiffe-auth-app:latest
     build:
       # Build the Go application from the client-go directory.
       # This makes it easy to make changes to the Go application and test them without having to rebuild the entire stack.
       # To update, use `docker compose up --build app -f docker-compose.client-go.app.yml -f docker-compose.yml`
       context: ./client-go
       dockerfile: Dockerfile
-      platforms:
-        # If you are not running on a Linux OS or do not have arm64, you can change this to the correct Docker `--platform` 
-        # value for your system.
-        - "linux/arm64"
       tags:
         - cassandra-spiffe-auth-app:latest
       target: app

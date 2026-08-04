@@ -33,7 +33,7 @@ docker compose build app
 docker compose exec spire-server /opt/spire/bin/spire-server entry create \
     -spiffeID spiffe://demo.trust.geico/app \
     -parentID spiffe://demo.trust.geico/agent-1 \
-    -selector docker:image_id:cassandra-spiffe-auth-app
+    -selector docker:image_id:cassandra-spiffe-auth-app:latest
 
 docker compose exec spire-server /opt/spire/bin/spire-server entry create \
     -spiffeID spiffe://demo.trust.geico/cassandra-node \

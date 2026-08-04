@@ -1,4 +1,4 @@
-FROM --platform=$BUILDPLATFORM golang:1.24-bookworm AS app
+FROM golang:1.25-bookworm AS app
 
 WORKDIR /app
 
